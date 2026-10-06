@@ -1,0 +1,32 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+credentials.json
+secrets.*
+
+# Dependencies and local environments
+node_modules/
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+
+# Local data and runtime output
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Editors and operating systems
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

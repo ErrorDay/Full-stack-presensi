@@ -1,0 +1,85 @@
+# ===========================
+# WEB FRAMEWORK & ADMIN PANEL
+# ===========================
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+sqladmin==0.20.1
+jinja2==3.1.5
+python-multipart==0.0.20
+itsdangerous==2.2.0
+bcrypt==4.0.1
+# ^ itsdangerous dibutuhkan starlette.middleware.sessions (SessionMiddleware)
+
+# ===========================
+# AUTENTIKASI
+# ===========================
+passlib[bcrypt]==1.7.4
+
+# ===========================
+# SCHEDULER (laporan harian otomatis)
+# ===========================
+apscheduler==3.10.4
+
+# ===========================
+# CORE
+# ===========================
+numpy==2.2.6
+opencv-python==4.12.0.88
+Pillow==11.3.0
+
+# ===========================
+# FACE RECOGNITION
+# ===========================
+insightface==0.7.3
+onnxruntime==1.22.1
+
+# ===========================
+# DATABASE
+# ===========================
+SQLAlchemy==2.0.42
+psycopg2-binary==2.9.10
+
+# ===========================
+# DATA PROCESSING
+# ===========================
+pandas==2.3.1
+openpyxl==3.1.5
+
+# ===========================
+# IMAGE
+# ===========================
+scikit-image==0.25.2
+
+# ===========================
+# UTILITIES
+# ===========================
+tqdm==4.67.1
+
+# ===========================
+# PDF REPORT
+# ===========================
+reportlab==4.4.3
+
+# ===========================
+# EXCEL EXPORT
+# ===========================
+xlsxwriter==3.2.5
+
+# ===========================
+# ENVIRONMENT
+# ===========================
+python-dotenv==1.1.1
+
+# ===========================
+# HTTP
+# ===========================
+requests==2.32.4
+
+# ===========================
+# TIDAK DIPAKAI LAGI DI VERSI WEB (opsional, boleh dihapus)
+# Dulu untuk GUI desktop PySide6 (App.py, tes_kamera.py) yang sudah
+# digantikan React + FastAPI. Aman dihapus kecuali kamu masih pakai
+# script desktop lama secara terpisah.
+# ===========================
+# PySide6==6.9.1
+# pyinstaller==6.15.0

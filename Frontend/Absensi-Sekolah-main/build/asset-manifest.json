@@ -1,0 +1,13 @@
+{
+  "files": {
+    "main.css": "/Absensi-Sekolah/static/css/main.be3428e3.css",
+    "main.js": "/Absensi-Sekolah/static/js/main.2cb4dd90.js",
+    "index.html": "/Absensi-Sekolah/index.html",
+    "main.be3428e3.css.map": "/Absensi-Sekolah/static/css/main.be3428e3.css.map",
+    "main.2cb4dd90.js.map": "/Absensi-Sekolah/static/js/main.2cb4dd90.js.map"
+  },
+  "entrypoints": [
+    "static/css/main.be3428e3.css",
+    "static/js/main.2cb4dd90.js"
+  ]
+}

@@ -1,0 +1,28 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python environments and bytecode
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+
+# Local data and generated files
+dataset/
+static/uploads/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Local tunnel executable
+cloudflared.exe.exe
+
+# Editor and operating-system files
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
