@@ -38,6 +38,7 @@ onnxruntime==1.22.1
 # ===========================
 SQLAlchemy==2.0.42
 psycopg2-binary==2.9.10
+pgvector==0.4.1
 
 # ===========================
 # DATA PROCESSING

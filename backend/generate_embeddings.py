@@ -1,165 +1,111 @@
-import json
+"""Generate 512-dimensional buffalo_l face vectors for students with photos."""
+
 import os
 
 import cv2
+import modules._patch_torch_deps  # noqa: F401
 import numpy as np
-
 from insightface.app import FaceAnalysis
 
+from database.models import FaceEmbedding, Siswa
 from database.session import SessionLocal
-from database.models import (
-    Siswa,
-    FaceEmbedding
-)
+
+EMBEDDING_DIMENSION = 512
+MODEL_NAME = "buffalo_l"
 
 
-app = FaceAnalysis(
-    providers=['CPUExecutionProvider']
-)
-
-app.prepare(
-    ctx_id=0,
-    det_size=(960, 960)
-)
-
-
-def baca_gambar(path: str):
-    """
-    Pengganti cv2.imread(path) langsung.
-
-    cv2.imread() punya bug lama di Windows: gagal decode file yang
-    pathnya mengandung spasi, tanda kurung, atau karakter non-ASCII
-    -- walaupun filenya benar-benar ada -- dan cuma melempar pesan
-    generik "can't open/read file: check file path/integrity".
-
-    np.fromfile() (baca byte mentah, aman untuk path apapun) +
-    cv2.imdecode() (decode dari byte, bukan dari path) tidak
-    kena masalah ini sama sekali.
-    """
+def baca_gambar(path: str) -> np.ndarray | None:
     try:
         data = np.fromfile(path, dtype=np.uint8)
         if data.size == 0:
             return None
         return cv2.imdecode(data, cv2.IMREAD_COLOR)
-    except Exception:
+    except OSError as exc:
+        print(f"[ERROR] Tidak dapat membaca foto {path!r}: {exc}")
         return None
 
 
-def generate_embeddings():
+def generate_embeddings() -> None:
+    app = FaceAnalysis(name=MODEL_NAME, providers=["CPUExecutionProvider"])
+    app.prepare(ctx_id=0, det_size=(960, 960))
     db = SessionLocal()
-
-    siswa_list = db.query(Siswa).all()
 
     total = 0
     gagal = 0
     skip = 0
     path_tidak_ada = 0
+    try:
+        siswa_list = db.query(Siswa).filter(Siswa.status == "Aktif").all()
 
-    for siswa in siswa_list:
-        try:
-            # ==========================
-            # Cek apakah embedding sudah ada
-            # ==========================
-            old_embedding = (
-                db.query(FaceEmbedding)
-                .filter(
-                    FaceEmbedding.siswa_id == siswa.id
+        for siswa in siswa_list:
+            try:
+                old_embedding = (
+                    db.query(FaceEmbedding)
+                    .filter(FaceEmbedding.student_id == siswa.id)
+                    .first()
                 )
-                .first()
-            )
+                if old_embedding:
+                    print(f"[SKIP] {siswa.name}: embedding sudah ada")
+                    skip += 1
+                    continue
 
-            if old_embedding:
-                print(f"[SKIP] {siswa.nama}")
-                skip += 1
-                continue
+                foto = siswa.foto
+                if not foto:
+                    print(f"[SKIP] {siswa.name}: path foto belum diisi")
+                    skip += 1
+                    continue
+                if not os.path.exists(foto):
+                    print(f"[GAGAL] Path foto tidak ditemukan: {foto}")
+                    path_tidak_ada += 1
+                    gagal += 1
+                    continue
 
-            foto = siswa.foto
+                image = baca_gambar(foto)
+                if image is None:
+                    print(f"[GAGAL] Foto tidak dapat di-decode: {foto}")
+                    gagal += 1
+                    continue
 
-            if not foto:
-                print(
-                    f"[GAGAL] Path foto kosong: {siswa.nama}"
+                faces = app.get(image)
+                if not faces:
+                    print(f"[GAGAL] Tidak ada wajah terdeteksi: {siswa.name}")
+                    gagal += 1
+                    continue
+                if len(faces) > 1:
+                    print(f"[PERINGATAN] Lebih dari satu wajah: {siswa.name}")
+
+                face = max(faces, key=lambda candidate: candidate.det_score)
+                embedding = np.asarray(face.embedding, dtype=np.float32)
+                if embedding.shape != (EMBEDDING_DIMENSION,) or not np.isfinite(embedding).all():
+                    raise ValueError(
+                        f"Embedding harus memiliki {EMBEDDING_DIMENSION} nilai finite; "
+                        f"shape diperoleh {embedding.shape}"
+                    )
+
+                db.add(
+                    FaceEmbedding(
+                        student_id=siswa.id,
+                        embedding=embedding.tolist(),
+                        model=MODEL_NAME,
+                    )
                 )
+                db.commit()
+                total += 1
+                print(f"[OK] {siswa.name}")
+            except Exception as exc:
+                db.rollback()
                 gagal += 1
-                continue
+                print(f"[ERROR] Gagal memproses {siswa.name} ({siswa.id}): {exc}")
 
-            # Cek dulu apakah filenya benar-benar ada di disk --
-            # supaya ketahuan pasti mana yang "file memang hilang"
-            # vs "file ada tapi cv2 gagal decode" (dua akar masalah
-            # yang beda, butuh penanganan beda).
-            if not os.path.exists(foto):
-                print(
-                    f"[GAGAL] Path tidak ditemukan di disk: {foto}"
-                )
-                path_tidak_ada += 1
-                gagal += 1
-                continue
-
-            image = baca_gambar(foto)
-
-            if image is None:
-                print(
-                    f"[GAGAL] File ada tapi gagal di-decode (rusak/format tidak didukung): {foto}"
-                )
-                gagal += 1
-                continue
-
-            faces = app.get(image)
-
-            if len(faces) == 0:
-                print(
-                    f"[GAGAL] Tidak ada wajah: {siswa.nama}"
-                )
-                gagal += 1
-                continue
-
-            if len(faces) > 1:
-                print(
-                    f"[PERINGATAN] Lebih dari satu wajah: {siswa.nama}"
-                )
-
-            face = faces[0]
-
-            embedding = (
-                face.embedding.astype(np.float32)
-            )
-
-            embedding_json = json.dumps(
-                embedding.tolist()
-            )
-
-            new_embedding = FaceEmbedding(
-                siswa_id=siswa.id,
-                embedding=embedding_json
-            )
-
-            db.add(new_embedding)
-            db.commit()
-
-            total += 1
-
-            print(
-                f"[OK] {siswa.nama}"
-            )
-
-        except Exception as e:
-            db.rollback()
-
-            gagal += 1
-
-            print(
-                f"[ERROR] {siswa.nama}"
-            )
-            print(e)
-
-    print("\n====================")
-    print("GENERATE SELESAI")
-    print("====================")
-    print(f"Berhasil        : {total}")
-    print(f"Skip            : {skip}")
-    print(f"Gagal           : {gagal}")
-    print(f"  - path hilang : {path_tidak_ada}")
-
-    db.close()
+        print("\n====================")
+        print("GENERATE SELESAI")
+        print("====================")
+        print(f"Berhasil        : {total}")
+        print(f"Skip            : {skip}")
+        print(f"Gagal           : {gagal}")
+        print(f"  - path hilang : {path_tidak_ada}")
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":

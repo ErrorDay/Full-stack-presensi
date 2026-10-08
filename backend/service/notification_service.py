@@ -121,7 +121,7 @@ def proses_laporan_harian(kelas_list: list = None):
     db = SessionLocal()
     try:
         if kelas_list is None:
-            kelas_list = [k.nama for k in db.query(Kelas).all()]
+            kelas_list = [k.name for k in db.query(Kelas).all()]
 
         for kelas in kelas_list:
             rekap = report.get_rekap_harian(kelas, tanggal)

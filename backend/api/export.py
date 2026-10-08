@@ -11,9 +11,10 @@ desain aslinya.
 import io
 import csv
 import calendar
+import uuid
 from datetime import date as date_cls
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Response
 
 from api.attendance_web import list_attendance
 from service.report_service import ReportService
@@ -77,10 +78,14 @@ def _filter_label(class_id: str | None) -> str:
         return "Semua Kelas"
     from database.session import SessionLocal
     from database.models import Kelas
+    try:
+        parsed_class_id = uuid.UUID(class_id)
+    except ValueError as exc:
+        raise HTTPException(422, "class_id harus UUID yang valid") from exc
     db = SessionLocal()
     try:
-        kelas = db.query(Kelas).filter(Kelas.id == int(class_id)).first()
-        return kelas.nama if kelas else "Semua Kelas"
+        kelas = db.query(Kelas).filter(Kelas.id == parsed_class_id).first()
+        return kelas.name if kelas else "Semua Kelas"
     finally:
         db.close()
 
@@ -111,16 +116,8 @@ def export_daily_pdf(date: str = Query(...), class_id: str | None = None, status
 def export_monthly_csv(year: int = Query(...), month: int = Query(...), class_id: str | None = None):
     report = ReportService()
     try:
-        from database.session import SessionLocal
-        from database.models import Kelas
-        kelas_nama = None
-        if class_id:
-            db = SessionLocal()
-            k = db.query(Kelas).filter(Kelas.id == int(class_id)).first()
-            kelas_nama = k.nama if k else None
-            db.close()
-
-        data = report.get_rekap_bulanan(year, month, kelas_nama)
+        parsed_class_id = _parse_class_id(class_id)
+        data = report.get_rekap_bulanan(year, month, parsed_class_id)
         rows = [[r["name"], r["nisn"], r["class_name"], r["hadir"], r["terlambat"], r["izin"], r["alpa"], r["total"]]
                 for r in data]
         return _csv_response(
@@ -135,19 +132,11 @@ def export_monthly_csv(year: int = Query(...), month: int = Query(...), class_id
 def export_monthly_pdf(year: int = Query(...), month: int = Query(...), class_id: str | None = None):
     report = ReportService()
     try:
-        from database.session import SessionLocal
-        from database.models import Kelas
         from modules.kalender import is_hari_sekolah
         from datetime import date as date_cls
 
-        kelas_nama = None
-        if class_id:
-            db = SessionLocal()
-            k = db.query(Kelas).filter(Kelas.id == int(class_id)).first()
-            kelas_nama = k.nama if k else None
-            db.close()
-
-        data = report.get_rekap_bulanan(year, month, kelas_nama)
+        parsed_class_id = _parse_class_id(class_id)
+        data = report.get_rekap_bulanan(year, month, parsed_class_id)
         rows = [[r["name"], r["nisn"], r["class_name"], r["hadir"], r["terlambat"], r["izin"], r["alpa"], r["total"]]
                 for r in data]
 
@@ -166,10 +155,19 @@ def export_monthly_pdf(year: int = Query(...), month: int = Query(...), class_id
         report.close()
 
 
+def _parse_class_id(class_id: str | None) -> uuid.UUID | None:
+    if not class_id:
+        return None
+    try:
+        return uuid.UUID(class_id)
+    except ValueError as exc:
+        raise HTTPException(422, "class_id harus UUID yang valid") from exc
+
+
 def _get_library_recap(type: str, date: str | None, month: int | None, year: int | None, class_id: str | None):
     library = LibraryService()
     try:
-        kelas_id = int(class_id) if class_id else None
+        kelas_id = _parse_class_id(class_id)
         if type == "weekly":
             return library.get_weekly_recap(date_cls.fromisoformat(date), kelas_id)
         return library.get_monthly_recap(year, month, kelas_id)

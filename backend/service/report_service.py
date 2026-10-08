@@ -1,97 +1,92 @@
-# report_service.py
+"""Attendance summaries and exports for the Supabase schema."""
+
+import uuid
 from datetime import date
 
-from sqlalchemy import extract, func, distinct
+import pandas as pd
+from sqlalchemy import distinct, extract, func
 
-from database.models import Absensi, Siswa, Kelas
+from database.models import Absensi, Kelas, Siswa
 from database.session import SessionLocal
 
 STATUS_LIST = ["Tidak Terlambat", "Terlambat", "Izin", "Alpa"]
 
 
 class ReportService:
-
     def __init__(self):
         self.db = SessionLocal()
 
-    # =====================================
-    # BULAN & KELAS TERSEDIA
-    # =====================================
-    def get_bulan_tersedia(self) -> list:
-        """Return list bulan (format 'YYYY-MM') yang ada datanya, terbaru dulu."""
+    def get_bulan_tersedia(self) -> list[str]:
         rows = (
             self.db.query(
-                extract("year", Absensi.tanggal),
-                extract("month", Absensi.tanggal),
+                extract("year", Absensi.attendance_date),
+                extract("month", Absensi.attendance_date),
             )
             .distinct()
             .all()
         )
-        bulan = sorted(
-            {f"{int(y):04d}-{int(m):02d}" for y, m in rows},
+        return sorted(
+            {f"{int(year):04d}-{int(month):02d}" for year, month in rows},
             reverse=True,
         )
-        return bulan
 
-    def get_kelas_tersedia(self, bulan: str) -> list:
-        """Return list nama kelas yang ada datanya di bulan tsb."""
-        tahun, bln = map(int, bulan.split("-"))
+    def get_kelas_tersedia(self, bulan: str) -> list[str]:
+        tahun, month = map(int, bulan.split("-"))
         rows = (
-            self.db.query(distinct(Kelas.nama))
-            .join(Siswa, Siswa.kelas_id == Kelas.id)
-            .join(Absensi, Absensi.siswa_id == Siswa.id)
+            self.db.query(distinct(Kelas.name))
+            .join(Siswa, Siswa.class_id == Kelas.id)
+            .join(Absensi, Absensi.student_id == Siswa.id)
             .filter(
-                extract("year", Absensi.tanggal) == tahun,
-                extract("month", Absensi.tanggal) == bln,
+                extract("year", Absensi.attendance_date) == tahun,
+                extract("month", Absensi.attendance_date) == month,
             )
             .all()
         )
-        return sorted([r[0] for r in rows])
+        return sorted(name for (name,) in rows if name is not None)
 
-    # =====================================
-    # REKAP HARIAN
-    # =====================================
-    def get_rekap_harian(self, kelas_nama: str, tanggal: date = None):
-        if tanggal is None:
-            tanggal = date.today()
-
+    def get_rekap_harian(
+        self, kelas_nama: str, tanggal: date | None = None
+    ) -> dict:
+        tanggal = tanggal or date.today()
         siswa_kelas = (
             self.db.query(Siswa)
-            .join(Kelas, Siswa.kelas_id == Kelas.id)
-            .filter(Kelas.nama == kelas_nama)
+            .join(Kelas, Siswa.class_id == Kelas.id)
+            .filter(Kelas.name == kelas_nama)
             .all()
         )
-
-        absensi_hari_ini = (
+        attendance = (
             self.db.query(Absensi)
-            .join(Siswa, Absensi.siswa_id == Siswa.id)
-            .join(Kelas, Siswa.kelas_id == Kelas.id)
-            .filter(Kelas.nama == kelas_nama, Absensi.tanggal == tanggal)
+            .join(Siswa, Absensi.student_id == Siswa.id)
+            .join(Kelas, Siswa.class_id == Kelas.id)
+            .filter(
+                Kelas.name == kelas_nama,
+                Absensi.attendance_date == tanggal,
+            )
             .all()
         )
-
-        status_map = {a.siswa_id: a.status for a in absensi_hari_ini}
-
+        status_by_student = {record.student_id: record.status for record in attendance}
         alpa = [
-            s.nama for s in siswa_kelas
-            if status_map.get(s.id, "Alpa") == "Alpa"
+            student.name
+            for student in siswa_kelas
+            if status_by_student.get(student.id, "Alpa") == "Alpa"
         ]
         terlambat = [
-            s.nama for s in siswa_kelas
-            if status_map.get(s.id) == "Terlambat"
+            student.name
+            for student in siswa_kelas
+            if status_by_student.get(student.id) == "Terlambat"
         ]
         izin = [
-            s.nama for s in siswa_kelas
-            if status_map.get(s.id) == "Izin"
+            student.name
+            for student in siswa_kelas
+            if status_by_student.get(student.id) == "Izin"
         ]
         total_hadir = sum(
-            1 for s in siswa_kelas
-            if status_map.get(s.id) in ("Tidak Terlambat", "Terlambat")
+            status_by_student.get(student.id) in ("Tidak Terlambat", "Terlambat")
+            for student in siswa_kelas
         )
-
         return {
             "kelas": kelas_nama,
-            "tanggal": tanggal.strftime("%Y-%m-%d"),
+            "tanggal": tanggal.isoformat(),
             "alpa": alpa,
             "terlambat": terlambat,
             "izin": izin,
@@ -99,79 +94,96 @@ class ReportService:
             "total_hadir": total_hadir,
         }
 
-    # =====================================
-    # REKAP BULANAN
-    # =====================================
-    def get_rekap_bulanan(self, tahun: int, bulan: int, kelas_nama: str = None):
+    def get_rekap_bulanan(
+        self,
+        tahun: int,
+        bulan: int,
+        class_id: uuid.UUID | None = None,
+    ) -> list[dict]:
         query = (
             self.db.query(
-                Siswa.id, Siswa.nis, Siswa.nama, Kelas.nama.label("kelas"),
-                Absensi.status, func.count(Absensi.id).label("jumlah"),
+                Siswa.id.label("student_id"),
+                Siswa.nisn,
+                Siswa.name,
+                Kelas.name.label("class_name"),
+                Absensi.status,
+                func.count(Absensi.id).label("jumlah"),
             )
-            .join(Absensi, Absensi.siswa_id == Siswa.id)
-            .join(Kelas, Siswa.kelas_id == Kelas.id)
+            .join(Absensi, Absensi.student_id == Siswa.id)
+            .outerjoin(Kelas, Siswa.class_id == Kelas.id)
             .filter(
-                extract("year", Absensi.tanggal) == tahun,
-                extract("month", Absensi.tanggal) == bulan,
+                extract("year", Absensi.attendance_date) == tahun,
+                extract("month", Absensi.attendance_date) == bulan,
             )
         )
+        if class_id is not None:
+            query = query.filter(Siswa.class_id == class_id)
+        rows = (
+            query.group_by(
+                Siswa.id,
+                Siswa.nisn,
+                Siswa.name,
+                Kelas.name,
+                Absensi.status,
+            )
+            .all()
+        )
 
-        if kelas_nama:
-            query = query.filter(Kelas.nama == kelas_nama)
-
-        rows = query.group_by(Siswa.id, Siswa.nis, Siswa.nama, Kelas.nama, Absensi.status).all()
-
-        hasil = {}
-        for siswa_id, nis, nama, kelas, status, jumlah in rows:
-            if siswa_id not in hasil:
-                hasil[siswa_id] = {
-                    "student_id": str(siswa_id),
-                    "nisn": nis or "",
-                    "name": nama,
-                    "class_name": kelas,
-                    "hadir": 0,       # = Tidak Terlambat, sesuai kontrak frontend
+        result: dict[uuid.UUID, dict] = {}
+        status_key = {
+            "Tidak Terlambat": "hadir",
+            "Terlambat": "terlambat",
+            "Izin": "izin",
+            "Alpa": "alpa",
+        }
+        for student_id, nisn, name, class_name, status, count in rows:
+            student = result.setdefault(
+                student_id,
+                {
+                    "student_id": str(student_id),
+                    "nisn": nisn,
+                    "name": name,
+                    "class_name": class_name or "",
+                    "hadir": 0,
                     "terlambat": 0,
                     "izin": 0,
                     "alpa": 0,
                     "total": 0,
-                }
-            key = {
-                "Tidak Terlambat": "hadir",
-                "Terlambat": "terlambat",
-                "Izin": "izin",
-                "Alpa": "alpa",
-            }.get(status)
+                },
+            )
+            key = status_key.get(status)
             if key:
-                hasil[siswa_id][key] = jumlah
-            hasil[siswa_id]["total"] += jumlah
+                student[key] = count
+            student["total"] += count
+        return list(result.values())
 
-        return list(hasil.values())
-
-    # =====================================
-    # EXPORT EXCEL
-    # =====================================
     def export_excel(self, bulan: str, output_file: str):
-        """Export semua kelas untuk bulan tsb ke Excel multi-sheet."""
-        import pandas as pd
-
-        tahun, bln = map(int, bulan.split("-"))
-        data = self.get_rekap_bulanan(tahun, bln)
-
+        tahun, month = map(int, bulan.split("-"))
+        data = self.get_rekap_bulanan(tahun, month)
         df = pd.DataFrame(data)
 
         with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
-            nama_sheet_rekap = f"Rekap_{bulan}"[:31]
-
-            if not df.empty:
-                df.to_excel(writer, sheet_name=nama_sheet_rekap, index=False)
-                for kelas in sorted(df["class_name"].unique()):
-                    df_kelas = df[df["class_name"] == kelas]
-                    df_kelas.to_excel(writer, sheet_name=kelas[:31], index=False)
-            else:
+            sheet_name = f"Rekap_{bulan}"[:31]
+            if df.empty:
                 pd.DataFrame(
-                    columns=["name", "class_name", "hadir", "terlambat", "izin", "alpa", "total"]
-                ).to_excel(writer, sheet_name=nama_sheet_rekap, index=False)
-
+                    columns=[
+                        "name",
+                        "class_name",
+                        "hadir",
+                        "terlambat",
+                        "izin",
+                        "alpa",
+                        "total",
+                    ]
+                ).to_excel(writer, sheet_name=sheet_name, index=False)
+            else:
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+                for class_name in sorted(df["class_name"].fillna("").unique()):
+                    if not class_name:
+                        continue
+                    df[df["class_name"] == class_name].to_excel(
+                        writer, sheet_name=class_name[:31], index=False
+                    )
         return output_file
 
     def close(self):

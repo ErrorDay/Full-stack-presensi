@@ -1,106 +1,118 @@
-"""
-api/students.py
-CRUD /students + POST /students/{id}/migrate + POST /students/assign-bulk
-+ POST /students/bulk-status + POST /students/bulk-status-angkatan
-+ POST /students/set-angkatan -- dipanggil Kelas.jsx & Siswa.jsx.
+"""CRUD endpoints for student records."""
 
-Proteksi role:
-  GET (lihat)                              -> admin, operator, walas (walas cuma lihat kelasnya sendiri)
-  POST/PUT/DELETE/migrate/assign-bulk/dll  -> admin saja
-"""
+import uuid
+from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Depends, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, field_validator
 
-from database.session import SessionLocal
-from database.models import Siswa, Kelas
-from api.grade_utils import tingkat_ke_grade
 from auth import require_role
+from database.models import Kelas, Siswa
+from database.session import SessionLocal
 
 router = APIRouter()
+
+STATUS_TO_DB = {"aktif": "Aktif", "nonaktif": "Nonaktif"}
+
+
+def _normalize_status(status: str) -> str:
+    normalized = STATUS_TO_DB.get(status.strip().casefold())
+    if normalized is None:
+        raise HTTPException(400, "Status harus Aktif atau Nonaktif")
+    return normalized
+
+
+def _serialize(siswa: Siswa, kelas: Kelas | None = None) -> dict:
+    kelas = kelas if kelas is not None else siswa.kelas
+    return {
+        "id": str(siswa.id),
+        "nisn": siswa.nisn,
+        "name": siswa.name,
+        "gender": siswa.gender,
+        "class_id": str(siswa.class_id) if siswa.class_id else None,
+        "class_name": kelas.name if kelas else "",
+        "grade": kelas.grade if kelas else None,
+        "status": siswa.status,
+        "foto": siswa.foto,
+        "angkatan": siswa.angkatan,
+    }
 
 
 class StudentIn(BaseModel):
     nisn: str
     name: str
-    gender: str = "L"
-    class_id: str
-    status: str = "AKTIF"
+    gender: Literal["L", "P"]
+    class_id: uuid.UUID | None = None
+    status: str = "Aktif"
+    foto: str | None = None
     angkatan: str | None = None
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, value: str) -> str:
+        normalized = STATUS_TO_DB.get(value.strip().casefold())
+        if normalized is None:
+            raise ValueError("Status harus Aktif atau Nonaktif")
+        return normalized
 
 
 class MigrateIn(BaseModel):
-    class_id: str
+    class_id: uuid.UUID
 
 
 class AssignBulkIn(BaseModel):
-    class_id: str
-    student_ids: list[str]
+    class_id: uuid.UUID
+    student_ids: list[uuid.UUID]
 
 
 class BulkStatusIn(BaseModel):
-    class_id: str
-    status: str  # "AKTIF" atau "NONAKTIF"
+    class_id: uuid.UUID
+    status: str
 
 
 class BulkStatusAngkatanIn(BaseModel):
     angkatan: str
-    status: str  # "AKTIF" atau "NONAKTIF"
+    status: str
 
 
 class SetAngkatanIn(BaseModel):
-    class_id: str
+    class_id: uuid.UUID
     angkatan: str
-
-
-def _serialize(siswa: Siswa, kelas: Kelas | None = None) -> dict:
-    kelas = kelas or siswa.kelas
-    return {
-        "id": str(siswa.id),
-        "nisn": siswa.nis or "",
-        "name": siswa.nama,
-        "gender": siswa.jenis_kelamin or "L",
-        "class_id": str(siswa.kelas_id),
-        "class_name": kelas.nama if kelas else "",
-        "grade": tingkat_ke_grade(kelas.tingkat) if kelas else "",
-        "status": siswa.status,
-        "angkatan": siswa.angkatan or "",
-    }
 
 
 @router.get("")
 def list_students(
-    class_id: str | None = None,
+    class_id: uuid.UUID | None = None,
     angkatan: str | None = None,
     q: str | None = None,
-    status: str | None = "AKTIF",
-    # ^ default cuma tampilkan yang AKTIF (angkatan yang sudah lulus/
-    # dinonaktifkan otomatis tersembunyi dari frontend). Kirim
-    # status=NONAKTIF untuk lihat alumni, atau status=semua untuk lihat semuanya.
+    status: str | None = "Aktif",
     user: dict = Depends(require_role("admin", "operator", "walas")),
 ):
     db = SessionLocal()
     try:
         query = db.query(Siswa)
-
         if user["role"] == "walas":
-            # walas cuma boleh lihat siswa di kelasnya, apapun class_id
-            # yang diminta di query param -- dipaksa timpa.
-            query = query.filter(Siswa.kelas_id == user["kelas_id"])
-        elif class_id:
-            query = query.filter(Siswa.kelas_id == int(class_id))
+            assigned_class = user.get("kelas_id")
+            if not assigned_class:
+                return []
+            try:
+                class_id = uuid.UUID(str(assigned_class))
+            except ValueError as exc:
+                raise HTTPException(403, "Kelas akun walas tidak valid") from exc
+        if class_id:
+            query = query.filter(Siswa.class_id == class_id)
 
         if angkatan:
             query = query.filter(Siswa.angkatan == angkatan)
 
         if status and status.lower() != "semua":
-            query = query.filter(Siswa.status == status)
+            query = query.filter(Siswa.status == _normalize_status(status))
 
         if q:
-            query = query.filter(Siswa.nama.ilike(f"%{q}%"))
+            query = query.filter(Siswa.name.ilike(f"%{q}%"))
 
-        siswa_list = query.order_by(Siswa.nama).all()
-        return [_serialize(s) for s in siswa_list]
+        siswa_list = query.order_by(Siswa.name).all()
+        return [_serialize(siswa) for siswa in siswa_list]
     finally:
         db.close()
 
@@ -109,20 +121,24 @@ def list_students(
 def create_student(data: StudentIn, user: dict = Depends(require_role("admin"))):
     db = SessionLocal()
     try:
-        kelas = db.query(Kelas).filter(Kelas.id == int(data.class_id)).first()
-        if kelas is None:
-            raise HTTPException(404, "Kelas tidak ditemukan")
+        kelas = None
+        if data.class_id is not None:
+            kelas = db.query(Kelas).filter(Kelas.id == data.class_id).first()
+            if kelas is None:
+                raise HTTPException(404, "Kelas tidak ditemukan")
 
-        if data.nisn and db.query(Siswa).filter(Siswa.nis == data.nisn).first():
-            raise HTTPException(400, "NIS/NISN sudah terdaftar")
+        if db.query(Siswa).filter(Siswa.nisn == data.nisn).first():
+            raise HTTPException(400, "NISN sudah terdaftar")
 
         siswa = Siswa(
-            nis=data.nisn or None,
-            nama=data.name,
-            kelas_id=kelas.id,
-            jenis_kelamin=data.gender,
+            id=uuid.uuid4(),
+            nisn=data.nisn,
+            name=data.name,
+            gender=data.gender,
+            class_id=data.class_id,
             status=data.status,
-            angkatan=data.angkatan or None,
+            foto=data.foto,
+            angkatan=data.angkatan,
         )
         db.add(siswa)
         db.commit()
@@ -133,26 +149,21 @@ def create_student(data: StudentIn, user: dict = Depends(require_role("admin")))
 
 
 @router.post("/assign-bulk")
-def assign_students_bulk(data: AssignBulkIn, user: dict = Depends(require_role("admin"))):
-    """
-    Masukkan banyak siswa YANG SUDAH TERDAFTAR ke satu kelas sekaligus
-    (dipakai Kelas.jsx saat admin pilih dari daftar siswa existing,
-    beda dari POST /students yang untuk siswa benar-benar baru).
-    """
+def assign_students_bulk(
+    data: AssignBulkIn, user: dict = Depends(require_role("admin"))
+):
     db = SessionLocal()
     try:
-        kelas = db.query(Kelas).filter(Kelas.id == int(data.class_id)).first()
+        kelas = db.query(Kelas).filter(Kelas.id == data.class_id).first()
         if kelas is None:
             raise HTTPException(404, "Kelas tidak ditemukan")
 
-        ids = [int(sid) for sid in data.student_ids]
         moved = (
             db.query(Siswa)
-            .filter(Siswa.id.in_(ids))
-            .update({"kelas_id": kelas.id}, synchronize_session=False)
+            .filter(Siswa.id.in_(data.student_ids))
+            .update({"class_id": kelas.id}, synchronize_session=False)
         )
         db.commit()
-
         return {"ok": True, "moved": moved, "class_id": str(kelas.id)}
     finally:
         db.close()
@@ -160,114 +171,123 @@ def assign_students_bulk(data: AssignBulkIn, user: dict = Depends(require_role("
 
 @router.post("/set-angkatan")
 def set_angkatan(data: SetAngkatanIn, user: dict = Depends(require_role("admin"))):
-    """
-    Tandai SEMUA siswa dalam satu kelas dengan angkatan tertentu sekaligus
-    -- dipakai sekali per kelas (mis. setelah seeding kelas baru), karena
-    angkatan tidak lagi dibaca dari struktur folder dataset/ (yang tetap
-    per kelas/jurusan seperti biasa).
-    """
     db = SessionLocal()
     try:
-        kelas = db.query(Kelas).filter(Kelas.id == int(data.class_id)).first()
+        kelas = db.query(Kelas).filter(Kelas.id == data.class_id).first()
         if kelas is None:
             raise HTTPException(404, "Kelas tidak ditemukan")
 
         jumlah = (
             db.query(Siswa)
-            .filter(Siswa.kelas_id == kelas.id)
+            .filter(Siswa.class_id == kelas.id)
             .update({"angkatan": data.angkatan}, synchronize_session=False)
         )
         db.commit()
-
-        return {"ok": True, "jumlah": jumlah, "class_id": str(kelas.id), "angkatan": data.angkatan}
+        return {
+            "ok": True,
+            "jumlah": jumlah,
+            "class_id": str(kelas.id),
+            "angkatan": data.angkatan,
+        }
     finally:
         db.close()
 
 
 @router.post("/bulk-status")
-def bulk_status(data: BulkStatusIn, request: Request, user: dict = Depends(require_role("admin"))):
-    """
-    Ubah status SEMUA siswa dalam satu KELAS sekaligus.
-    Untuk nonaktifkan berdasarkan ANGKATAN (lintas kelas), pakai
-    /students/bulk-status-angkatan sebagai gantinya.
-    """
-    if data.status not in ("AKTIF", "NONAKTIF"):
-        raise HTTPException(400, "status harus AKTIF atau NONAKTIF")
-
+def bulk_status(
+    data: BulkStatusIn,
+    request: Request,
+    user: dict = Depends(require_role("admin")),
+):
     db = SessionLocal()
     try:
-        kelas = db.query(Kelas).filter(Kelas.id == int(data.class_id)).first()
+        kelas = db.query(Kelas).filter(Kelas.id == data.class_id).first()
         if kelas is None:
             raise HTTPException(404, "Kelas tidak ditemukan")
 
+        status = _normalize_status(data.status)
         jumlah = (
             db.query(Siswa)
-            .filter(Siswa.kelas_id == kelas.id)
-            .update({"status": data.status}, synchronize_session=False)
+            .filter(Siswa.class_id == kelas.id)
+            .update({"status": status}, synchronize_session=False)
         )
         db.commit()
-
         request.app.state.recognition.reload_embeddings()
-
-        return {"ok": True, "jumlah": jumlah, "class_id": str(kelas.id), "status": data.status}
+        return {
+            "ok": True,
+            "jumlah": jumlah,
+            "class_id": str(kelas.id),
+            "status": status,
+        }
     finally:
         db.close()
 
 
 @router.post("/bulk-status-angkatan")
-def bulk_status_angkatan(data: BulkStatusAngkatanIn, request: Request, user: dict = Depends(require_role("admin"))):
-    """
-    Ubah status SEMUA siswa dalam satu ANGKATAN sekaligus -- dipakai saat
-    angkatan lulus, TIDAK PEDULI mereka sekarang tersebar di kelas mana
-    (termasuk yang sudah di-reshuffle/migrasi kelas). Ini alasan utama
-    kolom angkatan dipisah dari kelas_id.
-
-    Embedding wajah & data siswa TIDAK dihapus -- cuma disembunyikan
-    dari listing (status != AKTIF) dan dari recognition.
-    """
-    if data.status not in ("AKTIF", "NONAKTIF"):
-        raise HTTPException(400, "status harus AKTIF atau NONAKTIF")
-
+def bulk_status_angkatan(
+    data: BulkStatusAngkatanIn,
+    request: Request,
+    user: dict = Depends(require_role("admin")),
+):
     db = SessionLocal()
     try:
+        status = _normalize_status(data.status)
         jumlah = (
             db.query(Siswa)
             .filter(Siswa.angkatan == data.angkatan)
-            .update({"status": data.status}, synchronize_session=False)
+            .update({"status": status}, synchronize_session=False)
         )
         db.commit()
-
         request.app.state.recognition.reload_embeddings()
-
-        return {"ok": True, "jumlah": jumlah, "angkatan": data.angkatan, "status": data.status}
+        return {
+            "ok": True,
+            "jumlah": jumlah,
+            "angkatan": data.angkatan,
+            "status": status,
+        }
     finally:
         db.close()
 
 
 @router.put("/{student_id}")
-def update_student(student_id: int, data: StudentIn, request: Request, user: dict = Depends(require_role("admin"))):
+def update_student(
+    student_id: uuid.UUID,
+    data: StudentIn,
+    request: Request,
+    user: dict = Depends(require_role("admin")),
+):
     db = SessionLocal()
     try:
-        kelas = db.query(Kelas).filter(Kelas.id == int(data.class_id)).first()
-        if kelas is None:
-            raise HTTPException(404, "Kelas tidak ditemukan")
-
         siswa = db.query(Siswa).filter(Siswa.id == student_id).first()
         if siswa is None:
             raise HTTPException(404, "Siswa tidak ditemukan")
 
-        status_berubah = siswa.status != data.status
+        kelas = None
+        if data.class_id is not None:
+            kelas = db.query(Kelas).filter(Kelas.id == data.class_id).first()
+            if kelas is None:
+                raise HTTPException(404, "Kelas tidak ditemukan")
 
-        siswa.nis = data.nisn or None
-        siswa.nama = data.name
-        siswa.kelas_id = kelas.id
-        siswa.jenis_kelamin = data.gender
+        duplicate = (
+            db.query(Siswa)
+            .filter(Siswa.nisn == data.nisn, Siswa.id != student_id)
+            .first()
+        )
+        if duplicate:
+            raise HTTPException(400, "NISN sudah terdaftar")
+
+        status_changed = siswa.status != data.status
+        siswa.nisn = data.nisn
+        siswa.name = data.name
+        siswa.gender = data.gender
+        siswa.class_id = data.class_id
         siswa.status = data.status
-        siswa.angkatan = data.angkatan or None
+        siswa.foto = data.foto
+        siswa.angkatan = data.angkatan
         db.commit()
         db.refresh(siswa)
 
-        if status_berubah:
+        if status_changed:
             request.app.state.recognition.reload_embeddings()
 
         return _serialize(siswa, kelas)
@@ -276,7 +296,9 @@ def update_student(student_id: int, data: StudentIn, request: Request, user: dic
 
 
 @router.delete("/{student_id}")
-def delete_student(student_id: int, user: dict = Depends(require_role("admin"))):
+def delete_student(
+    student_id: uuid.UUID, user: dict = Depends(require_role("admin"))
+):
     db = SessionLocal()
     try:
         siswa = db.query(Siswa).filter(Siswa.id == student_id).first()
@@ -290,10 +312,14 @@ def delete_student(student_id: int, user: dict = Depends(require_role("admin")))
 
 
 @router.post("/{student_id}/migrate")
-def migrate_student(student_id: int, data: MigrateIn, user: dict = Depends(require_role("admin"))):
+def migrate_student(
+    student_id: uuid.UUID,
+    data: MigrateIn,
+    user: dict = Depends(require_role("admin")),
+):
     db = SessionLocal()
     try:
-        kelas = db.query(Kelas).filter(Kelas.id == int(data.class_id)).first()
+        kelas = db.query(Kelas).filter(Kelas.id == data.class_id).first()
         if kelas is None:
             raise HTTPException(404, "Kelas tujuan tidak ditemukan")
 
@@ -301,7 +327,7 @@ def migrate_student(student_id: int, data: MigrateIn, user: dict = Depends(requi
         if siswa is None:
             raise HTTPException(404, "Siswa tidak ditemukan")
 
-        siswa.kelas_id = kelas.id
+        siswa.class_id = kelas.id
         db.commit()
         db.refresh(siswa)
         return _serialize(siswa, kelas)

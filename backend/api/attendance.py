@@ -15,6 +15,7 @@ Beda utama dari versi PyQt5:
 """
 
 import time
+import uuid
 
 # WAJIB diimpor sebelum modul lain yang menyentuh InsightFace,
 # supaya tidak ikut menarik dependency torch yang bermasalah.
@@ -37,13 +38,13 @@ class ScanRequest(BaseModel):
 
 class FaceResult(BaseModel):
     nama: str | None
-    siswa_id: int | None
+    siswa_id: uuid.UUID | None
     similarity: float
     confidence: float
     is_real: bool
     spoof_score: float
     bbox: tuple[int, int, int, int]
-    status: str | None  # CHECK_IN / CHECK_OUT / ALREADY / None (tidak dikenali / fake)
+    status: str | None  # status presensi, COOLDOWN, atau None jika tidak tercatat
 
 
 @router.post("/scan", response_model=list[FaceResult])
@@ -83,18 +84,21 @@ def scan_presensi(payload: ScanRequest, request: Request):
             status = None
 
             if is_real and siswa is not None:
-                nama = siswa.nama.strip()
+                nama = siswa.name.strip()
                 sekarang = time.time()
 
                 if nama not in last_scan or sekarang - last_scan[nama] > COOLDOWN_DETIK:
-                    status = attendance.process_attendance(siswa)
+                    absensi, _updated = attendance.process_attendance(
+                        siswa, created_by=_session_user_id(request)
+                    )
+                    status = absensi.status
                     last_scan[nama] = sekarang
                 else:
                     status = "COOLDOWN"  # sudah diproses baru-baru ini, tidak insert ulang
 
             results.append(
                 FaceResult(
-                    nama=siswa.nama if siswa else None,
+                    nama=siswa.name if siswa else None,
                     siswa_id=siswa.id if siswa else None,
                     similarity=similarity,
                     confidence=confidence,
@@ -109,3 +113,13 @@ def scan_presensi(payload: ScanRequest, request: Request):
 
     finally:
         attendance.close()
+
+
+def _session_user_id(request: Request) -> uuid.UUID | None:
+    user_id = request.session.get("user_id")
+    if user_id is None:
+        return None
+    try:
+        return uuid.UUID(str(user_id))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=401, detail="ID pengguna pada sesi tidak valid") from exc

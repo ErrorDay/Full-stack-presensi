@@ -15,6 +15,7 @@ Sesuai keputusan login: endpoint di sini BELUM diproteksi require_login
 
 from datetime import datetime, date as date_cls
 import time
+import uuid
 
 # WAJIB diimpor sebelum modul lain yang menyentuh InsightFace.
 import modules._patch_torch_deps  # noqa: F401
@@ -36,7 +37,7 @@ COOLDOWN_DETIK = 10  # sama seperti api/attendance.py -- cegah 1 siswa tercatat 
 
 
 class AttendanceIn(BaseModel):
-    student_id: str
+    student_id: uuid.UUID
     status: str | None = None  # None -> otomatis; diisi -> override manual (mis. "Izin")
     date: str | None = None
     time: str | None = None
@@ -44,40 +45,40 @@ class AttendanceIn(BaseModel):
 
 class RecognizeIn(BaseModel):
     image_base64: str | None = None
-    student_id: str | None = None  # mode simulasi, tanpa kamera
+    student_id: uuid.UUID | None = None  # mode simulasi, tanpa kamera
     target: str = "attendance"  # "attendance" (default) atau "library" (kunjungan perpustakaan)
 
 
-def _serialize(a: Absensi, siswa: Siswa, kelas: Kelas) -> dict:
+def _serialize(a: Absensi, siswa: Siswa, kelas: Kelas | None) -> dict:
     return {
         "id": str(a.id),
-        "student_id": str(a.siswa_id),
-        "nisn": siswa.nis or "",
-        "name": siswa.nama,
-        "class_id": str(siswa.kelas_id),
-        "class_name": kelas.nama if kelas else "",
-        "date": a.tanggal.isoformat(),
-        "time": a.jam_masuk.strftime("%H:%M:%S"),
+        "student_id": str(a.student_id),
+        "nisn": siswa.nisn,
+        "name": siswa.name,
+        "class_id": str(siswa.class_id) if siswa.class_id else None,
+        "class_name": kelas.name if kelas else "",
+        "date": a.attendance_date.isoformat(),
+        "time": a.checked_at.astimezone().strftime("%H:%M:%S"),
         "status": a.status,
     }
 
 
-def _serialize_visit(k, siswa: Siswa, kelas: Kelas, visit_ke: int) -> dict:
+def _serialize_visit(k, siswa: Siswa, kelas: Kelas | None, visit_ke: int) -> dict:
     return {
         "id": str(k.id),
         "student_id": str(siswa.id),
-        "nisn": siswa.nis or "",
-        "name": siswa.nama,
-        "class_id": str(siswa.kelas_id),
-        "class_name": kelas.nama if kelas else "",
-        "date": k.tanggal.isoformat(),
-        "time": k.waktu.strftime("%H:%M:%S"),
+        "nisn": siswa.nisn,
+        "name": siswa.name,
+        "class_id": str(siswa.class_id) if siswa.class_id else None,
+        "class_name": kelas.name if kelas else "",
+        "date": k.visited_at.astimezone().date().isoformat(),
+        "time": k.visited_at.astimezone().strftime("%H:%M:%S"),
         "visit_ke": visit_ke,
     }
 
 
 @router.post("")
-def create_attendance(data: AttendanceIn):
+def create_attendance(data: AttendanceIn, request: Request):
     """Input manual -- dipakai walas untuk set status (mis. Izin)."""
 
     if data.status and data.status not in STATUS_LIST:
@@ -86,15 +87,31 @@ def create_attendance(data: AttendanceIn):
     db = SessionLocal()
     attendance = AttendanceService()
     try:
-        siswa = db.query(Siswa).filter(Siswa.id == int(data.student_id)).first()
+        siswa = db.query(Siswa).filter(Siswa.id == data.student_id).first()
         if siswa is None:
             raise HTTPException(404, "Siswa tidak ditemukan")
 
         tanggal = date_cls.fromisoformat(data.date) if data.date else None
         waktu = datetime.strptime(data.time, "%H:%M:%S").time() if data.time else None
 
-        absensi, updated = attendance.record_attendance(siswa, data.status, tanggal, waktu)
-        kelas = db.query(Kelas).filter(Kelas.id == siswa.kelas_id).first()
+        user_id = request.session.get("user_id")
+        try:
+            created_by = uuid.UUID(str(user_id)) if user_id else None
+        except ValueError as exc:
+            raise HTTPException(401, "ID pengguna pada sesi tidak valid") from exc
+        absensi, updated = attendance.record_attendance(
+            siswa,
+            data.status,
+            tanggal,
+            waktu,
+            created_by=created_by,
+            source="manual",
+        )
+        kelas = (
+            db.query(Kelas).filter(Kelas.id == siswa.class_id).first()
+            if siswa.class_id
+            else None
+        )
 
         return {"record": _serialize(absensi, siswa, kelas), "updated": updated}
     finally:
@@ -115,28 +132,34 @@ def list_attendance(
     try:
         query = (
             db.query(Absensi, Siswa, Kelas)
-            .join(Siswa, Absensi.siswa_id == Siswa.id)
-            .join(Kelas, Siswa.kelas_id == Kelas.id)
+            .join(Siswa, Absensi.student_id == Siswa.id)
+            .outerjoin(Kelas, Siswa.class_id == Kelas.id)
         )
 
         if date:
-            query = query.filter(Absensi.tanggal == date_cls.fromisoformat(date))
+            query = query.filter(Absensi.attendance_date == date_cls.fromisoformat(date))
         elif year and month:
             query = query.filter(
-                extract("year", Absensi.tanggal) == year,
-                extract("month", Absensi.tanggal) == month,
+                extract("year", Absensi.attendance_date) == year,
+                extract("month", Absensi.attendance_date) == month,
             )
         elif year:
-            query = query.filter(extract("year", Absensi.tanggal) == year)
+            query = query.filter(extract("year", Absensi.attendance_date) == year)
 
         if jam:
-            query = query.filter(Absensi.jam_masuk >= f"{jam.zfill(2)}:00:00", Absensi.jam_masuk < f"{jam.zfill(2)}:59:59")
+            query = query.filter(extract("hour", Absensi.checked_at) == int(jam))
         if class_id:
-            query = query.filter(Siswa.kelas_id == int(class_id))
+            try:
+                parsed_class_id = uuid.UUID(class_id)
+            except ValueError as exc:
+                raise HTTPException(422, "class_id harus UUID yang valid") from exc
+            query = query.filter(Siswa.class_id == parsed_class_id)
         if status:
             query = query.filter(Absensi.status == status)
 
-        rows = query.order_by(Absensi.tanggal.desc(), Absensi.jam_masuk.desc()).limit(10000).all()
+        rows = query.order_by(
+            Absensi.attendance_date.desc(), Absensi.checked_at.desc()
+        ).limit(10000).all()
         return [_serialize(a, s, k) for a, s, k in rows]
     finally:
         db.close()
@@ -163,20 +186,28 @@ def recognize(data: RecognizeIn, request: Request):
     try:
         # ---- mode simulasi: langsung catat tanpa gambar ----
         if data.student_id:
-            siswa = db.query(Siswa).filter(Siswa.id == int(data.student_id)).first()
+            siswa = db.query(Siswa).filter(Siswa.id == data.student_id).first()
             if siswa is None:
                 raise HTTPException(404, "Siswa tidak ditemukan")
-            kelas = db.query(Kelas).filter(Kelas.id == siswa.kelas_id).first()
+            kelas = (
+                db.query(Kelas).filter(Kelas.id == siswa.class_id).first()
+                if siswa.class_id
+                else None
+            )
 
             if is_library:
-                kunjungan, visit_ke = library.record_visit(siswa)
+                kunjungan, visit_ke = library.record_visit(
+                    siswa, created_by=_session_user_id(request), source="manual"
+                )
                 return {
                     "recognized": True,
                     "mode": "simulasi",
                     "visit": _serialize_visit(kunjungan, siswa, kelas, visit_ke),
                 }
 
-            absensi, updated = attendance.process_attendance(siswa)
+            absensi, updated = attendance.process_attendance(
+                siswa, created_by=_session_user_id(request)
+            )
             return {
                 "recognized": True,
                 "mode": "simulasi",
@@ -220,15 +251,21 @@ def recognize(data: RecognizeIn, request: Request):
             return {"recognized": False, "message": "Terdeteksi sebagai foto/spoof, bukan wajah asli."}
 
         siswa = db.query(Siswa).filter(Siswa.id == siswa_hasil.id).first()
-        kelas = db.query(Kelas).filter(Kelas.id == siswa.kelas_id).first()
-        nama = siswa.nama.strip()
+        kelas = (
+            db.query(Kelas).filter(Kelas.id == siswa.class_id).first()
+            if siswa.class_id
+            else None
+        )
+        nama = siswa.name.strip()
         sekarang = time.time()
 
         if is_library:
             if nama in last_scan and sekarang - last_scan[nama] < COOLDOWN_DETIK:
-                return {"recognized": False, "message": f"{siswa.nama} baru saja tercatat, tunggu beberapa detik."}
+                return {"recognized": False, "message": f"{siswa.name} baru saja tercatat, tunggu beberapa detik."}
 
-            kunjungan, visit_ke = library.record_visit(siswa)
+            kunjungan, visit_ke = library.record_visit(
+                siswa, created_by=_session_user_id(request), source="face"
+            )
             last_scan[nama] = sekarang
             return {
                 "recognized": True,
@@ -241,7 +278,10 @@ def recognize(data: RecognizeIn, request: Request):
         if nama in last_scan and sekarang - last_scan[nama] < COOLDOWN_DETIK:
             absensi_hari_ini = (
                 db.query(Absensi)
-                .filter(Absensi.siswa_id == siswa.id, Absensi.tanggal == date_cls.today())
+                .filter(
+                    Absensi.student_id == siswa.id,
+                    Absensi.attendance_date == date_cls.today(),
+                )
                 .first()
             )
             return {
@@ -252,7 +292,9 @@ def recognize(data: RecognizeIn, request: Request):
                 "cooldown": True,
             }
 
-        absensi, updated = attendance.process_attendance(siswa)
+        absensi, updated = attendance.process_attendance(
+            siswa, created_by=_session_user_id(request)
+        )
         last_scan[nama] = sekarang
 
         return {
@@ -282,16 +324,21 @@ def recap_monthly(year: int = Query(...), month: int = Query(...), class_id: str
             if is_hari_sekolah(date_cls(year, month, d))
         )
 
-        kelas_nama = None
-        if class_id:
-            db = SessionLocal()
-            try:
-                kelas = db.query(Kelas).filter(Kelas.id == int(class_id)).first()
-                kelas_nama = kelas.nama if kelas else None
-            finally:
-                db.close()
-
-        rows = report.get_rekap_bulanan(year, month, kelas_nama)
+        try:
+            parsed_class_id = uuid.UUID(class_id) if class_id else None
+        except ValueError as exc:
+            raise HTTPException(422, "class_id harus UUID yang valid") from exc
+        rows = report.get_rekap_bulanan(year, month, parsed_class_id)
         return {"year": year, "month": month, "hari_sekolah": hari_sekolah_count, "rows": rows}
     finally:
         report.close()
+
+
+def _session_user_id(request: Request) -> uuid.UUID | None:
+    user_id = request.session.get("user_id")
+    if user_id is None:
+        return None
+    try:
+        return uuid.UUID(str(user_id))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(401, "ID pengguna pada sesi tidak valid") from exc

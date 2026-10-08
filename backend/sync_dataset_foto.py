@@ -7,7 +7,7 @@ di kolom Siswa.foto sudah tidak valid lagi.
 
 v2 -- perbaikan dari versi pertama setelah ketahuan 2 masalah:
 
-1. Siswa.nama di database ternyata masih menyimpan angka "(N)" yang
+1. Siswa.name di database ternyata masih menyimpan angka "(N)" yang
    dulu ke-parse dari nama file foto lama (mis. "ABDUL FAKHRY
    WICAKSONO (4)"), padahal file foto baru TIDAK punya angka itu.
    -> Sekarang di-strip dulu dengan regex sebelum dicocokkan.
@@ -83,22 +83,22 @@ def sync_dataset_foto():
 
         siswa_list = (
             db.query(Siswa, Kelas)
-            .join(Kelas, Siswa.kelas_id == Kelas.id)
+            .join(Kelas, Siswa.class_id == Kelas.id)
             .all()
         )
 
         for siswa, kelas in siswa_list:
 
-            nama_bersih = bersihkan_nama(siswa.nama)
+            nama_bersih = bersihkan_nama(siswa.name)
 
             if POLA_NAMA_FILE_KAMERA.match(nama_bersih):
-                kemungkinan_sampah.append(f"{siswa.nama} (id={siswa.id}, {kelas.nama})")
+                kemungkinan_sampah.append(f"{siswa.name} (id={siswa.id}, {kelas.name})")
                 continue
 
             # 1) coba dulu di folder kelas SAAT INI
             path_baru = None
             for ext in EKSTENSI_DICOBA:
-                kandidat = os.path.join(DATASET_DIR, kelas.nama, f"{nama_bersih}{ext}")
+                kandidat = os.path.join(DATASET_DIR, kelas.name, f"{nama_bersih}{ext}")
                 if os.path.exists(kandidat):
                     path_baru = kandidat
                     break
@@ -109,14 +109,14 @@ def sync_dataset_foto():
                 path_baru = index_foto.get(nama_bersih.upper())
 
             if path_baru is None:
-                tidak_ketemu.append(f"{siswa.nama} (id={siswa.id}, {kelas.nama})")
+                tidak_ketemu.append(f"{siswa.name} (id={siswa.id}, {kelas.name})")
                 continue
 
             if siswa.foto == path_baru:
                 sudah_benar += 1
                 continue
 
-            print(f"[UPDATE] {siswa.nama}: {siswa.foto!r} -> {path_baru!r}")
+            print(f"[UPDATE] {siswa.name}: {siswa.foto!r} -> {path_baru!r}")
             siswa.foto = path_baru
             diperbarui += 1
 
