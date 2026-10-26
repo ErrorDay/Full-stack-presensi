@@ -1,13 +1,22 @@
-"""Library visit recording and reporting."""
+"""
+service/library_service.py
 
-import uuid
+Service untuk fitur baru "Kunjungan Perpustakaan" -- terpisah dari
+AttendanceService karena semantiknya beda: satu siswa BOLEH tercatat
+berkali-kali dalam satu hari, tetapi hanya setelah cooldown satu jam
+sejak kunjungan terakhirnya.
+"""
+
 from datetime import date, datetime, time, timedelta
 
-from database.models import Kelas, Kunjungan, Siswa
+from database.models import Kunjungan, Siswa, Kelas
 from database.session import SessionLocal
 
 
 class LibraryService:
+
+    COOLDOWN = timedelta(hours=1)
+
     def __init__(self):
         self.db = SessionLocal()
 
@@ -16,120 +25,112 @@ class LibraryService:
         siswa: Siswa,
         tanggal: date | None = None,
         waktu: time | None = None,
-        created_by: uuid.UUID | None = None,
-        source: str = "face",
-    ) -> tuple[Kunjungan, int]:
-        if source not in ("face", "manual"):
-            raise ValueError(f"Sumber kunjungan tidak valid: {source}")
+    ) -> tuple[Kunjungan | None, int]:
+        """
+        Catat kunjungan baru jika siswa tidak berkunjung dalam satu jam terakhir.
+        Return (None, 0) jika siswa masih dalam masa cooldown.
+        Return: (Kunjungan, visit_ke) -- visit_ke = urutan kunjungan
+        siswa ini pada hari itu (1 = kunjungan pertama hari itu, dst).
+        """
+        now = datetime.now()
+        tanggal = tanggal or now.date()
+        waktu = waktu or now.time()
 
-        visited_at = (
-            datetime.combine(tanggal, waktu).astimezone()
-            if tanggal is not None and waktu is not None
-            else datetime.now().astimezone()
+        last_visit = (
+            self.db.query(Kunjungan)
+            .filter(Kunjungan.siswa_id == siswa.id)
+            .order_by(Kunjungan.tanggal.desc(), Kunjungan.waktu.desc())
+            .first()
         )
-        kunjungan = Kunjungan(
-            id=uuid.uuid4(),
-            student_id=siswa.id,
-            visited_at=visited_at,
-            source=source,
-            created_by=created_by,
-        )
+        if last_visit:
+            last_visit_at = datetime.combine(last_visit.tanggal, last_visit.waktu)
+            if datetime.combine(tanggal, waktu) - last_visit_at < self.COOLDOWN:
+                return None, 0
+
+        kunjungan = Kunjungan(siswa_id=siswa.id, tanggal=tanggal, waktu=waktu)
         self.db.add(kunjungan)
         self.db.commit()
         self.db.refresh(kunjungan)
 
-        day_start = datetime.combine(visited_at.date(), time.min).astimezone()
-        next_day = day_start + timedelta(days=1)
         visit_ke = (
-            self.db.query(Kunjungan.id)
-            .filter(
-                Kunjungan.student_id == siswa.id,
-                Kunjungan.visited_at >= day_start,
-                Kunjungan.visited_at < next_day,
-            )
+            self.db.query(Kunjungan)
+            .filter(Kunjungan.siswa_id == siswa.id, Kunjungan.tanggal == tanggal)
             .count()
         )
+
         return kunjungan, visit_ke
 
-    def get_recap(
-        self,
-        start: date,
-        end: date,
-        class_id: uuid.UUID | None = None,
-    ) -> dict:
-        start_at = datetime.combine(start, time.min).astimezone()
-        end_exclusive = datetime.combine(end + timedelta(days=1), time.min).astimezone()
+    def get_recap(self, start: date, end: date, kelas_id: int | None = None) -> dict:
+        """
+        Rekap kunjungan dalam rentang tanggal [start, end] inklusif.
+        Dipakai untuk rekap mingguan (Senin-Minggu) maupun bulanan.
+        """
         query = (
             self.db.query(Kunjungan, Siswa, Kelas)
-            .join(Siswa, Kunjungan.student_id == Siswa.id)
-            .outerjoin(Kelas, Siswa.class_id == Kelas.id)
-            .filter(
-                Kunjungan.visited_at >= start_at,
-                Kunjungan.visited_at < end_exclusive,
-            )
+            .join(Siswa, Kunjungan.siswa_id == Siswa.id)
+            .join(Kelas, Siswa.kelas_id == Kelas.id)
+            .filter(Kunjungan.tanggal >= start, Kunjungan.tanggal <= end)
         )
-        if class_id is not None:
-            query = query.filter(Siswa.class_id == class_id)
+
+        if kelas_id:
+            query = query.filter(Siswa.kelas_id == kelas_id)
 
         rows = query.all()
-        per_student: dict[uuid.UUID, dict] = {}
-        daily_students: dict[date, set[uuid.UUID]] = {}
-        for visit, siswa, kelas in rows:
-            visit_date = visit.visited_at.astimezone().date()
-            daily_students.setdefault(visit_date, set()).add(siswa.id)
-            row = per_student.setdefault(
-                siswa.id,
-                {
-                    "student_id": str(siswa.id),
-                    "nisn": siswa.nisn,
-                    "name": siswa.name,
-                    "class_name": kelas.name if kelas else "",
-                    "visits": 0,
-                    "_days": set(),
-                },
-            )
-            row["visits"] += 1
-            row["_days"].add(visit_date)
 
+        total_visits = len(rows)
+        unique_students = len({k.siswa_id for k, s, kls in rows})
+
+        # rekap harian (dipakai tampilan "Rekap Pekan")
         daily = []
-        current = start
-        while current <= end:
-            daily.append(
-                {
-                    "date": current.isoformat(),
-                    "visitors": len(daily_students.get(current, set())),
-                }
-            )
-            current += timedelta(days=1)
+        cur = start
+        while cur <= end:
+            visitors = len({k.siswa_id for k, s, kls in rows if k.tanggal == cur})
+            daily.append({"date": cur.isoformat(), "visitors": visitors})
+            cur += timedelta(days=1)
 
-        output_rows = []
-        for row in per_student.values():
-            row["days"] = len(row.pop("_days"))
-            output_rows.append(row)
-        output_rows.sort(key=lambda row: (-row["visits"], row["name"]))
+        # rekap per siswa
+        per_siswa = {}
+        for k, s, kls in rows:
+            if s.id not in per_siswa:
+                per_siswa[s.id] = {
+                    "student_id": str(s.id),
+                    "nisn": s.nis or "",
+                    "name": s.nama,
+                    "class_name": kls.nama,
+                    "visits": 0,
+                    "_hari": set(),
+                }
+            per_siswa[s.id]["visits"] += 1
+            per_siswa[s.id]["_hari"].add(k.tanggal)
+
+        rows_out = []
+        for r in per_siswa.values():
+            r["days"] = len(r.pop("_hari"))
+            rows_out.append(r)
+
+        rows_out.sort(key=lambda r: r["visits"], reverse=True)
 
         return {
             "start": start.isoformat(),
             "end": end.isoformat(),
-            "total_visits": len(rows),
-            "unique_students": len(per_student),
+            "total_visits": total_visits,
+            "unique_students": unique_students,
             "daily": daily,
-            "rows": output_rows,
+            "rows": rows_out,
         }
 
-    def get_weekly_recap(
-        self, tanggal: date, class_id: uuid.UUID | None = None
-    ) -> dict:
-        monday = tanggal - timedelta(days=tanggal.weekday())
-        return self.get_recap(monday, monday + timedelta(days=6), class_id)
+    def get_weekly_recap(self, tanggal: date, kelas_id: int | None = None) -> dict:
+        """Senin-Minggu dari minggu yang mengandung `tanggal`."""
+        senin = tanggal - timedelta(days=tanggal.weekday())
+        minggu = senin + timedelta(days=6)
+        return self.get_recap(senin, minggu, kelas_id)
 
-    def get_monthly_recap(
-        self, tahun: int, bulan: int, class_id: uuid.UUID | None = None
-    ) -> dict:
+    def get_monthly_recap(self, tahun: int, bulan: int, kelas_id: int | None = None) -> dict:
         import calendar
-
-        final_day = calendar.monthrange(tahun, bulan)[1]
-        return self.get_recap(date(tahun, bulan, 1), date(tahun, bulan, final_day), class_id)
+        hari_terakhir = calendar.monthrange(tahun, bulan)[1]
+        start = date(tahun, bulan, 1)
+        end = date(tahun, bulan, hari_terakhir)
+        return self.get_recap(start, end, kelas_id)
 
     def close(self):
         self.db.close()

@@ -8,7 +8,6 @@ Query params:
 """
 
 from datetime import date as date_cls
-import uuid
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -23,19 +22,21 @@ def library_recap(
     date: str | None = None,
     month: int | None = None,
     year: int | None = None,
-    class_id: uuid.UUID | None = None,
+    class_id: str | None = None,
 ):
     library = LibraryService()
     try:
+        kelas_id = int(class_id) if class_id else None
+
         if type == "weekly":
             if not date:
                 raise HTTPException(400, "Parameter 'date' diperlukan untuk type=weekly")
-            return library.get_weekly_recap(date_cls.fromisoformat(date), class_id)
+            return library.get_weekly_recap(date_cls.fromisoformat(date), kelas_id)
 
         if type == "monthly":
             if not month or not year:
                 raise HTTPException(400, "Parameter 'month' dan 'year' diperlukan untuk type=monthly")
-            return library.get_monthly_recap(year, month, class_id)
+            return library.get_monthly_recap(year, month, kelas_id)
 
         raise HTTPException(400, "type harus 'weekly' atau 'monthly'")
 

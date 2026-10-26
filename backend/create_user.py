@@ -1,88 +1,67 @@
-"""Set up a local password/role for an existing Supabase Auth user."""
+"""
+create_user.py
+Script CLI untuk membuat akun admin/operator/walas.
+
+Dijalankan manual dari terminal (bukan lewat form SQLAdmin), karena
+password perlu di-hash (bcrypt) dulu sebelum disimpan — SQLAdmin form
+biasa akan menyimpan teks polos kalau tidak ditangani khusus.
+
+Setelah akun pertama dibuat, admin bisa membuat operator tambahan
+langsung dari halaman admin (User) — TAPI perlu logic khusus supaya
+password di-hash saat create/edit lewat form (akan dibahas saat
+membangun halaman login di tahap 4).
+
+Cara pakai:
+    python create_user.py
+"""
 
 import getpass
-import uuid
 
-from auth import ROLES, hash_password
-from database.models import Kelas, User
 from database.session import SessionLocal
+from database.models import User
+from auth import ROLES, hash_password
 
 
-def create_user() -> None:
-    print(
-        "Masukkan UUID akun yang SUDAH ADA di Supabase Auth "
-        "(users.id mereferensikan auth.users.id)."
-    )
-    try:
-        user_id = uuid.UUID(input("Supabase Auth user UUID: ").strip())
-    except ValueError:
-        print("[GAGAL] UUID Supabase Auth tidak valid.")
-        return
-
-    username = input("Username: ").strip()
-    nama = input("Nama lengkap: ").strip()
-    role = input("Role (admin/operator/walas): ").strip().lower() or "operator"
-    if role not in ROLES:
-        print(f"[GAGAL] Role harus salah satu dari: {', '.join(ROLES)}.")
-        return
-
-    kelas_id = None
-    if role == "walas":
-        try:
-            kelas_id = uuid.UUID(input("UUID kelas untuk walas: ").strip())
-        except ValueError:
-            print("[GAGAL] UUID kelas tidak valid.")
-            return
-
-    password = getpass.getpass("Password lokal: ")
-    password_confirm = getpass.getpass("Ulangi password: ")
-    if password != password_confirm:
-        print("[GAGAL] Password tidak sama.")
-        return
-    if len(password) < 8:
-        print("[GAGAL] Password minimal 8 karakter.")
-        return
-    if not username or not nama:
-        print("[GAGAL] Username dan nama wajib diisi.")
-        return
-
+def create_user():
     db = SessionLocal()
+
     try:
-        existing_id = db.query(User).filter(User.id == user_id).first()
-        existing_username = (
-            db.query(User).filter(User.username == username).first()
-        )
-        if existing_username and existing_username.id != user_id:
+        username = input("Username: ").strip()
+
+        existing = db.query(User).filter(User.username == username).first()
+        if existing:
             print(f"[GAGAL] Username '{username}' sudah dipakai.")
             return
-        if existing_id:
-            existing_id.username = username
-            existing_id.password_hash = hash_password(password)
-            existing_id.nama = nama
-            existing_id.role = role
-            existing_id.kelas_id = kelas_id
-            db.commit()
-            print(f"[OK] Profil lokal '{username}' ({role}) berhasil disimpan.")
+
+        nama = input("Nama lengkap: ").strip()
+        role = input("Role (admin/operator/walas): ").strip().lower() or "operator"
+        if role not in ROLES:
+            print(f"[GAGAL] Role harus salah satu dari: {', '.join(ROLES)}.")
+            return
+        password = getpass.getpass("Password: ")
+        password_confirm = getpass.getpass("Ulangi password: ")
+
+        if password != password_confirm:
+            print("[GAGAL] Password tidak sama.")
             return
 
-        if kelas_id is not None and db.query(Kelas.id).filter(Kelas.id == kelas_id).first() is None:
-            print("[GAGAL] Kelas UUID tidak ditemukan.")
+        if len(password) < 8:
+            print("[GAGAL] Password minimal 8 karakter.")
             return
 
         user = User(
-            id=user_id,
             username=username,
             password_hash=hash_password(password),
             nama=nama,
             role=role,
-            kelas_id=kelas_id,
+            aktif=True,
         )
+
         db.add(user)
         db.commit()
-        print(f"[OK] Profil lokal '{username}' ({role}) berhasil dibuat.")
-    except Exception:
-        db.rollback()
-        raise
+
+        print(f"[OK] Akun '{username}' ({role}) berhasil dibuat.")
+
     finally:
         db.close()
 

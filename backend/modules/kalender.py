@@ -1,4 +1,5 @@
 # kalender.py
+import json
 from datetime import date
 from database.models import HariLibur, Setting
 from database.session import SessionLocal
@@ -19,7 +20,10 @@ def is_hari_sekolah(tanggal: date = None) -> bool:
     db = SessionLocal()
     try:
         setting = db.query(Setting).first()
-        hari_sekolah = list(setting.hari_sekolah) if setting else [0, 1, 2, 3, 4]
+        hari_sekolah = (
+            json.loads(setting.hari_sekolah)
+            if setting else [0, 1, 2, 3, 4]
+        )
 
         if tanggal.weekday() not in hari_sekolah:
             return False

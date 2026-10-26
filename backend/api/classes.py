@@ -7,24 +7,21 @@ Proteksi role:
   POST/PUT/DELETE/PATCH (ubah)   -> admin saja
 """
 
-import uuid
+from fastapi import APIRouter, HTTPException, Depends
 
-from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from database.session import SessionLocal
 from database.models import Kelas, Siswa
+from api.grade_utils import tingkat_ke_grade, grade_ke_tingkat
 from auth import require_role
 
 router = APIRouter()
 
-ROMAN_TO_GRADE = {"X": 10, "XI": 11, "XII": 12}
-GRADE_TO_ROMAN = {value: key for key, value in ROMAN_TO_GRADE.items()}
-
 
 class ClassIn(BaseModel):
     name: str
-    grade: int | str
+    grade: int | str  # frontend kirim integer (10/11/12); dikonversi ke Romawi saat disimpan
 
 
 class VisibilityIn(BaseModel):
@@ -32,29 +29,16 @@ class VisibilityIn(BaseModel):
     visible: bool
 
 
-def _parse_grade(value: int | str) -> int:
-    if isinstance(value, str):
-        value = ROMAN_TO_GRADE.get(value.strip().upper(), value.strip())
-    try:
-        grade = int(value)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(422, "Grade harus 10, 11, 12, X, XI, atau XII") from exc
-    if grade not in GRADE_TO_ROMAN:
-        raise HTTPException(422, "Grade harus 10, 11, atau 12")
-    return grade
-
-
 def _serialize(kelas: Kelas, db) -> dict:
     student_count = (
         db.query(Siswa)
-        .filter(Siswa.class_id == kelas.id, Siswa.status == "Aktif")
+        .filter(Siswa.kelas_id == kelas.id, Siswa.status == "AKTIF")
         .count()
     )
     return {
         "id": str(kelas.id),
-        "name": kelas.name,
-        "grade": kelas.grade,
-        "grade_roman": GRADE_TO_ROMAN[kelas.grade],
+        "name": kelas.nama,
+        "grade": tingkat_ke_grade(kelas.tingkat),
         "visible": kelas.visible,
         "student_count": student_count,
     }
@@ -67,12 +51,9 @@ def list_classes(user: dict = Depends(require_role("admin", "operator", "walas")
         query = db.query(Kelas)
 
         if user["role"] == "walas":
-            class_id = user.get("kelas_id")
-            if not class_id:
-                return []
-            query = query.filter(Kelas.id == uuid.UUID(str(class_id)))
+            query = query.filter(Kelas.id == user["kelas_id"])
 
-        classes = query.order_by(Kelas.grade, Kelas.name).all()
+        classes = query.order_by(Kelas.tingkat, Kelas.nama).all()
         return [_serialize(k, db) for k in classes]
     finally:
         db.close()
@@ -82,14 +63,16 @@ def list_classes(user: dict = Depends(require_role("admin", "operator", "walas")
 def create_class(data: ClassIn, user: dict = Depends(require_role("admin"))):
     db = SessionLocal()
     try:
-        exists = db.query(Kelas).filter(Kelas.name == data.name).first()
+        exists = db.query(Kelas).filter(Kelas.nama == data.name).first()
         if exists:
             raise HTTPException(400, "Nama kelas sudah ada")
 
         kelas = Kelas(
-            id=uuid.uuid4(),
-            name=data.name,
-            grade=_parse_grade(data.grade),
+            nama=data.name,
+            tingkat=grade_ke_tingkat(data.grade),
+            jurusan="",
+            tahun_ajaran="2026/2027",
+            aktif=True,
             visible=True,
         )
         db.add(kelas)
@@ -101,15 +84,15 @@ def create_class(data: ClassIn, user: dict = Depends(require_role("admin"))):
 
 
 @router.put("/{class_id}")
-def update_class(class_id: uuid.UUID, data: ClassIn, user: dict = Depends(require_role("admin"))):
+def update_class(class_id: int, data: ClassIn, user: dict = Depends(require_role("admin"))):
     db = SessionLocal()
     try:
         kelas = db.query(Kelas).filter(Kelas.id == class_id).first()
         if kelas is None:
             raise HTTPException(404, "Kelas tidak ditemukan")
 
-        kelas.name = data.name
-        kelas.grade = _parse_grade(data.grade)
+        kelas.nama = data.name
+        kelas.tingkat = grade_ke_tingkat(data.grade)
         db.commit()
         db.refresh(kelas)
         return _serialize(kelas, db)
@@ -118,10 +101,10 @@ def update_class(class_id: uuid.UUID, data: ClassIn, user: dict = Depends(requir
 
 
 @router.delete("/{class_id}")
-def delete_class(class_id: uuid.UUID, user: dict = Depends(require_role("admin"))):
+def delete_class(class_id: int, user: dict = Depends(require_role("admin"))):
     db = SessionLocal()
     try:
-        n = db.query(Siswa).filter(Siswa.class_id == class_id).count()
+        n = db.query(Siswa).filter(Siswa.kelas_id == class_id).count()
         if n:
             raise HTTPException(400, f"Kelas masih memiliki {n} siswa. Pindahkan siswa terlebih dahulu.")
 
@@ -141,14 +124,9 @@ def set_visibility(data: VisibilityIn, user: dict = Depends(require_role("admin"
     """Sembunyikan/tampilkan SEMUA kelas dalam satu tingkat sekaligus."""
     db = SessionLocal()
     try:
-        grade = _parse_grade(data.grade)
-        db.query(Kelas).filter(Kelas.grade == grade).update({"visible": data.visible})
+        tingkat = grade_ke_tingkat(data.grade)
+        db.query(Kelas).filter(Kelas.tingkat == tingkat).update({"visible": data.visible})
         db.commit()
-        return {
-            "ok": True,
-            "grade": grade,
-            "grade_roman": GRADE_TO_ROMAN[grade],
-            "visible": data.visible,
-        }
+        return {"ok": True, "grade": data.grade, "visible": data.visible}
     finally:
         db.close()

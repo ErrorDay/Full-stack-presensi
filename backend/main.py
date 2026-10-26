@@ -9,6 +9,7 @@ TIDAK diubah — hanya dipanggil dari sini / dari router di folder api/.
 
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 # WAJIB diimpor sebelum modul lain yang menyentuh InsightFace,
 # supaya tidak ikut menarik dependency torch yang bermasalah.
@@ -33,7 +34,7 @@ from api import attendance, enrollment
 from api import dashboard, classes, students, attendance_web, settings_web, export, library, auth_web
 # ^ router baru (Opsi B) yang match kontrak frontend React (Emergent UI)
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:

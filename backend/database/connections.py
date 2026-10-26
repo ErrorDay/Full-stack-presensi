@@ -3,12 +3,13 @@ connection.py
 Mengelola koneksi PostgreSQL menggunakan SQLAlchemy.
 """
 
+from pathlib import Path
+
 from sqlalchemy import create_engine
 from dotenv import load_dotenv
 import os
 
-# Load environment variables
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT")
