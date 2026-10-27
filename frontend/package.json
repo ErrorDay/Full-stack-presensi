@@ -1,7 +1,7 @@
 {
   "name": "frontend",
   "version": "0.1.0",
-  "homepage": "https://errorday.github.io/Absensi-Sekolah",
+  "homepage": ".",
   "private": true,
   "dependencies": {
     "@hookform/resolvers": "5.0.1",
