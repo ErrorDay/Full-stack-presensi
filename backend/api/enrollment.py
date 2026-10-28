@@ -25,12 +25,13 @@ import numpy as np
 # WAJIB diimpor sebelum modul lain yang menyentuh InsightFace.
 import modules._patch_torch_deps  # noqa: F401
 
-from fastapi import APIRouter, Request, HTTPException, UploadFile, File
+from fastapi import APIRouter, Request, HTTPException, UploadFile, File, Depends
 from pydantic import BaseModel
 
 from database.session import SessionLocal
 from database.models import Siswa, FaceEmbedding
 from api.utils import decode_base64_image
+from auth import require_role
 
 router = APIRouter()
 
@@ -80,7 +81,12 @@ def _simpan_embedding(db, siswa_id: int, embedding: np.ndarray) -> None:
 
 
 @router.post("/{siswa_id}/enroll/upload", response_model=EnrollResponse)
-async def enroll_upload(siswa_id: int, request: Request, file: UploadFile = File(...)):
+async def enroll_upload(
+    siswa_id: int,
+    request: Request,
+    file: UploadFile = File(...),
+    user: dict = Depends(require_role("admin")),
+):
     """
     Alur 1: upload satu foto wajah.
     Setara dengan generate_embeddings.py lama, tapi langsung per-siswa
@@ -137,7 +143,12 @@ async def enroll_upload(siswa_id: int, request: Request, file: UploadFile = File
 
 
 @router.post("/{siswa_id}/enroll/camera", response_model=EnrollResponse)
-def enroll_camera(siswa_id: int, payload: EnrollCameraRequest, request: Request):
+def enroll_camera(
+    siswa_id: int,
+    payload: EnrollCameraRequest,
+    request: Request,
+    user: dict = Depends(require_role("admin")),
+):
     """
     Alur 2: live-camera multi-pose (depan/kiri/kanan), terinspirasi
     ambilWajah.js di e-course. Server memilih frame dengan det_score

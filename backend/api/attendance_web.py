@@ -9,8 +9,9 @@ menyediakan kontrak PERSIS yang diharapkan frontend React (Opsi B),
 termasuk mode simulasi (student_id langsung, tanpa gambar) dan
 override status manual (dipakai walas untuk set "Izin").
 
-Sesuai keputusan login: endpoint di sini BELUM diproteksi require_login
-("sambungkan dulu tanpa login, tambah belakangan").
+Proteksi akses: semua endpoint membutuhkan sesi login; operator/admin dapat
+memindai dan mengelola presensi, sedangkan walas hanya dapat melihat atau
+mengubah presensi siswa di kelasnya sendiri.
 """
 
 from datetime import datetime, date as date_cls
@@ -19,7 +20,7 @@ import time
 # WAJIB diimpor sebelum modul lain yang menyentuh InsightFace.
 import modules._patch_torch_deps  # noqa: F401
 
-from fastapi import APIRouter, Request, HTTPException, Query
+from fastapi import APIRouter, Request, HTTPException, Query, Depends
 from pydantic import BaseModel
 from sqlalchemy import extract
 
@@ -29,6 +30,7 @@ from service.attendance_service import AttendanceService, STATUS_LIST
 from service.library_service import LibraryService
 from service.report_service import ReportService
 from api.utils import decode_base64_image
+from auth import require_role, check_walas_scope
 
 router = APIRouter()
 
@@ -77,7 +79,10 @@ def _serialize_visit(k, siswa: Siswa, kelas: Kelas, visit_ke: int) -> dict:
 
 
 @router.post("")
-def create_attendance(data: AttendanceIn):
+def create_attendance(
+    data: AttendanceIn,
+    user: dict = Depends(require_role("admin", "operator", "walas")),
+):
     """Input manual -- dipakai walas untuk set status (mis. Izin)."""
 
     if data.status and data.status not in STATUS_LIST:
@@ -89,6 +94,7 @@ def create_attendance(data: AttendanceIn):
         siswa = db.query(Siswa).filter(Siswa.id == int(data.student_id)).first()
         if siswa is None:
             raise HTTPException(404, "Siswa tidak ditemukan")
+        check_walas_scope(user, siswa.kelas_id)
 
         tanggal = date_cls.fromisoformat(data.date) if data.date else None
         waktu = datetime.strptime(data.time, "%H:%M:%S").time() if data.time else None
@@ -110,6 +116,7 @@ def list_attendance(
     class_id: str | None = None,
     status: str | None = None,
     month: int | None = None,
+    user: dict = Depends(require_role("admin", "operator", "walas")),
 ):
     db = SessionLocal()
     try:
@@ -131,7 +138,9 @@ def list_attendance(
 
         if jam:
             query = query.filter(Absensi.jam_masuk >= f"{jam.zfill(2)}:00:00", Absensi.jam_masuk < f"{jam.zfill(2)}:59:59")
-        if class_id:
+        if user["role"] == "walas":
+            query = query.filter(Siswa.kelas_id == user["kelas_id"])
+        elif class_id:
             query = query.filter(Siswa.kelas_id == int(class_id))
         if status:
             query = query.filter(Absensi.status == status)
@@ -143,7 +152,11 @@ def list_attendance(
 
 
 @router.post("/recognize")
-def recognize(data: RecognizeIn, request: Request):
+def recognize(
+    data: RecognizeIn,
+    request: Request,
+    user: dict = Depends(require_role("admin", "operator")),
+):
     """
     Titik integrasi kamera -- setara POST /api/attendance/recognize
     di server.py Emergent, tapi recognition-nya jalan langsung di
@@ -275,8 +288,14 @@ def recognize(data: RecognizeIn, request: Request):
 
 
 @router.get("/recap/monthly")
-def recap_monthly(year: int = Query(...), month: int = Query(...), class_id: str | None = None):
+def recap_monthly(
+    year: int = Query(...),
+    month: int = Query(...),
+    class_id: str | None = None,
+    user: dict = Depends(require_role("admin", "operator", "walas")),
+):
     report = ReportService()
+    db = SessionLocal()
     try:
         from modules.kalender import is_hari_sekolah
         import calendar as _cal
@@ -288,15 +307,19 @@ def recap_monthly(year: int = Query(...), month: int = Query(...), class_id: str
         )
 
         kelas_nama = None
-        if class_id:
-            db = SessionLocal()
-            try:
-                kelas = db.query(Kelas).filter(Kelas.id == int(class_id)).first()
-                kelas_nama = kelas.nama if kelas else None
-            finally:
-                db.close()
+        if user["role"] == "walas":
+            if user["kelas_id"] is None:
+                raise HTTPException(403, "Walas belum terhubung ke kelas.")
+            kelas = db.query(Kelas).filter(Kelas.id == user["kelas_id"]).first()
+            if kelas is None:
+                raise HTTPException(403, "Kelas walas tidak ditemukan.")
+            kelas_nama = kelas.nama
+        elif class_id:
+            kelas = db.query(Kelas).filter(Kelas.id == int(class_id)).first()
+            kelas_nama = kelas.nama if kelas else None
 
         rows = report.get_rekap_bulanan(year, month, kelas_nama)
         return {"year": year, "month": month, "hari_sekolah": hari_sekolah_count, "rows": rows}
     finally:
+        db.close()
         report.close()
