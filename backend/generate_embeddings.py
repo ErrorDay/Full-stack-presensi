@@ -1,4 +1,3 @@
-import json
 import os
 
 import cv2
@@ -123,9 +122,8 @@ def generate_embeddings():
                 face.embedding.astype(np.float32)
             )
 
-            embedding_json = json.dumps(
-                embedding.tolist()
-            )
+            embedding /= np.linalg.norm(embedding)
+            embedding_json = embedding.tolist()
 
             new_embedding = FaceEmbedding(
                 siswa_id=siswa.id,

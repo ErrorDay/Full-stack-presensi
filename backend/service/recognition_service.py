@@ -1,12 +1,12 @@
 # recognition_service.py — bagian atas, versi bersih
-import json
 import time
 
 import numpy as np
 from insightface.app import FaceAnalysis
 
-from database.models import FaceEmbedding, Siswa
+from database.models import Siswa
 from database.session import SessionLocal
+from service.supabase_face_search import cari_siswa_terdekat
 
 
 class RecognitionService:
@@ -28,74 +28,9 @@ class RecognitionService:
             det_size=(640, 640)
         )
 
-        self.known_faces = []
-
-        self.load_embeddings()
-
-    def load_embeddings(self):
-        """
-        Memuat seluruh embedding dari database
-        ke dalam RAM agar recognition menjadi cepat.
-        """
-
-        db = SessionLocal()
-
-        try:
-
-            self.known_faces.clear()
-
-            data = (
-                db.query(
-                    FaceEmbedding,
-                    Siswa
-                )
-                .join(
-                    Siswa,
-                    FaceEmbedding.siswa_id == Siswa.id
-                )
-                .filter(Siswa.status == "AKTIF")
-                # ^ siswa nonaktif (mis. sudah lulus) TETAP punya baris
-                # FaceEmbedding di database (tidak dihapus), tapi TIDAK
-                # ikut dimuat ke memori -- jadi tidak akan pernah lagi
-                # cocok/terdeteksi saat scan kamera.
-                .all()
-            )
-
-            for embedding_db, siswa in data:
-
-                embedding = np.array(
-                    json.loads(
-                        embedding_db.embedding
-                    ),
-                    dtype=np.float32
-                )
-
-                # Normalisasi embedding
-                embedding /= np.linalg.norm(
-                    embedding
-                )
-
-                self.known_faces.append(
-                    {
-                        "siswa": siswa,
-                        "embedding": embedding
-                    }
-                )
-
-            print(
-                f"[INFO] {len(self.known_faces)} embeddings dimuat."
-            )
-
-        finally:
-
-            db.close()
-
     def reload_embeddings(self):
-        """
-        Digunakan ketika ada siswa baru.
-        """
-
-        self.load_embeddings()
+        """Tidak diperlukan lagi: pencarian dibaca langsung dari Supabase."""
+        return
 
     @staticmethod
     def cosine_similarity(
@@ -151,20 +86,34 @@ class RecognitionService:
                 embedding
             )
 
+            match = cari_siswa_terdekat(
+                embedding.tolist(),
+                top_k=1,
+                threshold=1.0 - self.threshold,
+            )
+
             best_score = -1.0
             best_match = None
 
-            for known in self.known_faces:
+            if match is not None:
+                db = SessionLocal()
+                try:
+                    siswa = (
+                        db.query(Siswa)
+                        .filter(
+                            Siswa.id == int(match["siswa_id"]),
+                            Siswa.status == "AKTIF",
+                        )
+                        .first()
+                    )
+                finally:
+                    db.close()
 
-                score = self.cosine_similarity(
-                    embedding,
-                    known["embedding"]
-                )
-
-                if score > best_score:
-
-                    best_score = score
-                    best_match = known
+                if siswa is not None:
+                    best_match = siswa
+                    best_score = float(
+                        1.0 - float(match["cosine_distance"])
+                    )
 
             x1, y1, x2, y2 = map(
                 int,
@@ -177,7 +126,7 @@ class RecognitionService:
             )
 
             print(
-                f"{best_match['siswa'].nama if best_match else 'Unknown'} "
+                f"{best_match.nama if best_match else 'Unknown'} "
                 f"| similarity = {best_score:.4f}"
             )
 
@@ -188,7 +137,7 @@ class RecognitionService:
 
                 results.append(
                     {
-                        "siswa": best_match["siswa"],
+                        "siswa": best_match,
                         "similarity": float(best_score),
                         "confidence": confidence,
                         "bbox": (

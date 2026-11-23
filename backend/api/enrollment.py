@@ -15,7 +15,6 @@ multi-pose di sini hanya membantu MEMILIH capture terbaik dari
 beberapa sudut, bukan menyimpan semuanya.
 """
 
-import json
 import os
 import uuid
 
@@ -64,7 +63,11 @@ def _simpan_embedding(db, siswa_id: int, embedding: np.ndarray) -> None:
     Upsert FaceEmbedding — karena siswa_id unique, kalau sudah ada
     baris lama, di-replace embedding-nya (bukan bikin baris baru).
     """
-    embedding_json = json.dumps(embedding.astype(np.float32).tolist())
+    embedding_normalized = embedding.astype(np.float32)
+    norm = np.linalg.norm(embedding_normalized)
+    if norm > 0:
+        embedding_normalized /= norm
+    embedding_value = embedding_normalized.tolist()
 
     existing = (
         db.query(FaceEmbedding)
@@ -73,9 +76,9 @@ def _simpan_embedding(db, siswa_id: int, embedding: np.ndarray) -> None:
     )
 
     if existing:
-        existing.embedding = embedding_json
+        existing.embedding = embedding_value
     else:
-        db.add(FaceEmbedding(siswa_id=siswa_id, embedding=embedding_json))
+        db.add(FaceEmbedding(siswa_id=siswa_id, embedding=embedding_value))
 
     db.commit()
 

@@ -23,6 +23,7 @@ from sqlalchemy.orm import (
     mapped_column,
     relationship
 )
+from pgvector.sqlalchemy import Vector
 
 from database.base import Base
 
@@ -302,8 +303,8 @@ class FaceEmbedding(Base):
         nullable=False
     )
 
-    embedding: Mapped[str] = mapped_column(
-        Text,
+    embedding: Mapped[list[float]] = mapped_column(
+        Vector(512),
         nullable=False
     )
 
